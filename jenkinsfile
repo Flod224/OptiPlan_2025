@@ -1,0 +1,155 @@
+pipeline{
+  agent any
+
+//Environment 
+    environment {
+      APP_NAME = "schedulersefense"
+      DOCKER_USER = "hack2k21"
+      IMAGE_NAME = "${DOCKER_USER}" + "/" + "${APP_NAME}"
+      //IMAGE_REPOS = "devops-thesis-project"
+      IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+
+  stages{
+   //code analysis with sonarqube
+    stage('SonarQube Analysis') {
+
+                //def scannerHome = tool 'SonarScanner';
+                steps
+                {
+
+                      script {
+                              def scannerHome = tool 'SonarScanner'
+                              withSonarQubeEnv() {
+                                sh "${scannerHome}/bin/sonar-scanner"
+                                }
+                            }
+                }
+      }
+
+    // Code vulnerabily scan with OWASP ZAP TOP 10
+
+    stage('Dependancy-Vuln check OWASP') {
+
+      steps{
+            dependencyCheck additionalArguments:'', odcInstallation: 'OWASP-ZAP-DP'
+            //sh 'mv dependency-check-report.xml ./reports/'
+            dependencyCheckPublisher pattern: 'dependency-check-report.xml'
+        }
+      
+    }
+
+// Depoeiment on test env
+
+ stage('Deploiement on Test Env') {
+   steps{
+        sh "pwd"
+    	sh "sudo ./stop_service.sh"
+        sh "sudo docker build -t ${IMAGE_NAME} ."
+    	sh 'sudo docker run -d -p 80:80 ${IMAGE_NAME}:latest'
+    	//sh 'docker compose up -d'
+         }
+  }
+
+//Run test 
+ stage('Tests Runing') {
+    steps{
+    sh "sleep 5"
+    sh "php vendor/bin/codecept run  --no-redirect --steps Acceptance --html"}
+}
+    
+
+    //Publish report
+
+  stage('Generating Allure Reports') {
+        steps{allure([
+            includeProperties: false,
+            jdk: '',
+            properties: [],
+            reportBuildPolicy: 'ALWAYS',
+            results: [[path: 'tests/_output/allure-results']]
+        ])}
+
+    }
+
+
+
+//Build  prod docker image
+
+stage('Build & push prod docker image'){
+
+            steps {
+         //   sh "docker build -t ${IMAGE_NAME} ."
+            sh "docker logout"
+
+           withCredentials([usernamePassword(credentialsId: 'dockerhub', passwordVariable: 'DOCKER_PASS', usernameVariable: 'DOKER_USER')]) {
+            
+              sh "sudo docker login -u ${DOCKER_USER} -p ${DOCKER_PASS}"
+              sh "sudo docker tag ${IMAGE_NAME}:latest  ${IMAGE_NAME}:${IMAGE_TAG}"
+              sh "sudo docker push ${IMAGE_NAME}:${IMAGE_TAG}"
+              sh "sudo docker push ${IMAGE_NAME}:latest"
+              }
+          } 
+        }
+
+//Docker image scanning with trivy
+ stage("Trivy Image Scan") {
+             steps {
+              withCredentials([usernamePassword(credentialsId: 'dockerhub', passwordVariable: 'DOCKER_PASS', usernameVariable: 'DOKER_USER')]){
+                 script {
+                    sh "sudo docker login -u ${DOCKER_USER} -p ${DOCKER_PASS}"
+	                sh ("trivy image ${IMAGE_NAME}:latest --no-progress --scanners vuln  --exit-code 0 --severity HIGH,CRITICAL --format table > reports/TrivyScannerResult.txt")
+                    //sh ("trivy image ${IMAGE_NAME}:latest --no-progress --scanners vuln  --exit-code 0 --severity HIGH,CRITICAL --format template --template @/usr/local/share/trivy/templates/html.tpl -o reports/Trivy_Report.html")
+                     }}
+             }
+         }
+
+
+//Cleanup Artifacts
+stage ('Cleanup Artifacts') {
+             
+          steps{
+            sh "sudo docker rmi  ${IMAGE_NAME}:${IMAGE_TAG}"
+            //sh "sudo docker rmi ${IMAGE_NAME}:latest"
+            }
+            
+             
+         }
+//Deploying App to Prod env
+    stage('Deploying App to Prod env') {
+            steps {
+                script {
+                    def remote = [:]
+                    remote.sudo = true
+                    remote.name = 'K8smaster'
+                    remote.host = '40.127.10.147'
+                    remote.user = 'level'
+                    remote.password = 'Level@DevOps'
+                    remote.allowAnyHosts = true
+
+                    sshCommand remote: remote, command: "sudo ./stop_service.sh"
+                    sshCommand remote: remote, command: "sudo docker pull ${IMAGE_NAME}:latest"
+                    //sshCommand remote: remote, command: "sudo docker run -d -p 80:80 ${IMAGE_NAME}:latest"
+                    //sshCommand remote: remote, command: "docker rmi -f ${IMAGE_NAME}:latest 2> /dev/null"
+
+                }
+            }
+        }
+
+//Discord Notificarion
+stage('Discord Notification'){
+
+steps {
+    script {
+
+    discordSend description: 'The app was successfully deliver on Prod Env, run the following CMD to deploy: sudo docker run -d -p 80:80 hack2k21/schedulersefense:latest', footer: '', image: '', link: '', result: 'Successfully', scmWebUrl: '', thumbnail: '', title: 'Deploiement status', webhookURL: 'https://discordapp.com/api/webhooks/1241771888280207494/6AjUfGOpfke1roJmXK7BqAM9PDvNrX1QobPZjIzfeoPsvPKQ4tCDGHgCk4n3N8_cJmvA'
+
+}
+}
+    
+
+}
+
+}
+
+}
